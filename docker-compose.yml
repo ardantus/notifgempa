@@ -1,0 +1,20 @@
+services:
+  gempa_monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - SLACK_WEBHOOK=${SLACK_WEBHOOK}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - SEND_TO_SLACK=${SEND_TO_SLACK}
+      - SEND_TO_TELEGRAM=${SEND_TO_TELEGRAM}
+    volumes:
+      - ./data:/data
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+volumes:
+  gempa_data:
