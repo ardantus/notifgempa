@@ -1,15 +1,13 @@
 FROM php:8.1-cli
 
-# Install dependencies
-RUN apt-get update && apt-get install -y \
+# Install all dependencies in a single layer for better caching
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4-openssl-dev \
-    && docker-php-ext-install curl \
-    && apt-get clean
-
-# Install SQLite
-RUN apt-get update && apt-get install -y sqlite3 libsqlite3-dev \
-    && docker-php-ext-install pdo_sqlite \
-    && apt-get clean
+    sqlite3 \
+    libsqlite3-dev \
+    && docker-php-ext-install curl pdo_sqlite \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app

@@ -11,41 +11,112 @@ $DATA_URLS = [
     'gempadirasakan' => 'https://data.bmkg.go.id/DataMKG/TEWS/gempadirasakan.xml'
 ];
 $DB_FILE = '/data/gempa.db';
-$CHECK_INTERVAL = 200; // 15 menit dalam detik
+$CHECK_INTERVAL = 200; // ~3.3 menit (200 detik)
 $RETRY_ATTEMPTS = 3; // Jumlah percobaan ulang
 $RETRY_DELAY = 5; // Jeda antar percobaan (detik)
 $MAX_AGE_HOURS = 24; // Hanya notifikasi gempa dalam 24 jam terakhir
+$HTTP_TIMEOUT = 30; // Timeout untuk HTTP requests (detik)
+$HTTP_CONNECT_TIMEOUT = 10; // Timeout untuk koneksi HTTP (detik)
+
+// Flag untuk graceful shutdown
+$shutdown_requested = false;
+
+// Fungsi logging dengan level
+function log_message($level, $message) {
+    $timestamp = date('Y-m-d H:i:s');
+    error_log("[$timestamp] [$level] $message");
+}
+
+// Validasi environment variables
+function validate_config() {
+    global $SEND_TO_SLACK, $SEND_TO_TELEGRAM, $SLACK_WEBHOOK, $TELEGRAM_BOT_TOKEN, $TELEGRAM_CHAT_ID;
+    
+    if ($SEND_TO_SLACK && empty($SLACK_WEBHOOK)) {
+        log_message('ERROR', 'SEND_TO_SLACK is enabled but SLACK_WEBHOOK is empty');
+        return false;
+    }
+    
+    if ($SEND_TO_TELEGRAM) {
+        if (empty($TELEGRAM_BOT_TOKEN)) {
+            log_message('ERROR', 'SEND_TO_TELEGRAM is enabled but TELEGRAM_BOT_TOKEN is empty');
+            return false;
+        }
+        if (empty($TELEGRAM_CHAT_ID)) {
+            log_message('ERROR', 'SEND_TO_TELEGRAM is enabled but TELEGRAM_CHAT_ID is empty');
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+// Graceful shutdown handler
+function shutdown_handler($signal) {
+    global $shutdown_requested;
+    $shutdown_requested = true;
+    log_message('INFO', "Received signal $signal, shutting down gracefully...");
+}
+
+// Setup signal handlers
+if (function_exists('pcntl_signal')) {
+    pcntl_signal(SIGTERM, 'shutdown_handler');
+    pcntl_signal(SIGINT, 'shutdown_handler');
+}
 
 // Inisialisasi database SQLite
 function init_db() {
     global $DB_FILE;
-    $db = new PDO("sqlite:$DB_FILE");
-    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    
-    $db->exec("CREATE TABLE IF NOT EXISTS gempa (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        datetime TEXT,
-        tanggal TEXT,
-        jam TEXT,
-        magnitude TEXT,
-        kedalaman TEXT,
-        wilayah TEXT,
-        lintang TEXT,
-        bujur TEXT,
-        coordinates TEXT,
-        potensi TEXT,
-        dirasakan TEXT,
-        shakemap TEXT,
-        source TEXT,
-        UNIQUE(datetime, source)
-    )");
-    
-    return $db;
+    try {
+        $db = new PDO("sqlite:$DB_FILE");
+        $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $db->exec("CREATE TABLE IF NOT EXISTS gempa (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            datetime TEXT,
+            tanggal TEXT,
+            jam TEXT,
+            magnitude TEXT,
+            kedalaman TEXT,
+            wilayah TEXT,
+            lintang TEXT,
+            bujur TEXT,
+            coordinates TEXT,
+            potensi TEXT,
+            dirasakan TEXT,
+            shakemap TEXT,
+            source TEXT,
+            UNIQUE(datetime, source)
+        )");
+        
+        log_message('INFO', 'Database initialized successfully');
+        return $db;
+    } catch (PDOException $e) {
+        log_message('ERROR', 'Database initialization failed: ' . $e->getMessage());
+        throw $e;
+    }
+}
+
+// Escape Markdown untuk Telegram
+function escape_markdown($text) {
+    if (empty($text)) {
+        return '';
+    }
+    // Escape karakter Markdown yang berbahaya
+    return str_replace(
+        ['*', '_', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'],
+        ['\\*', '\\_', '\\[', '\\]', '\\(', '\\)', '\\~', '\\`', '\\>', '\\#', '\\+', '\\-', '\\=', '\\|', '\\{', '\\}', '\\.', '\\!'],
+        $text
+    );
 }
 
 // Fungsi untuk kirim notifikasi Slack
 function send_slack_notification($gempa, $source) {
-    global $SLACK_WEBHOOK;
+    global $SLACK_WEBHOOK, $HTTP_TIMEOUT, $HTTP_CONNECT_TIMEOUT;
+    
+    if (empty($SLACK_WEBHOOK)) {
+        log_message('WARNING', 'Slack webhook not configured, skipping notification');
+        return false;
+    }
     
     $title = $source === 'autogempa' ? "Gempa Terbaru" : 
              ($source === 'gempaterkini' ? "Gempa Terkini" : "Gempa Dirasakan");
@@ -91,7 +162,7 @@ function send_slack_notification($gempa, $source) {
         ]
     ];
 
-    if ($source === 'autogempa' && $gempa['shakemap']) {
+    if ($source === 'autogempa' && !empty($gempa['shakemap'])) {
         $message['blocks'][] = [
             "type" => "image",
             "image_url" => "https://data.bmkg.go.id/DataMKG/TEWS/{$gempa['shakemap']}",
@@ -104,36 +175,62 @@ function send_slack_notification($gempa, $source) {
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => json_encode($message),
         CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-        CURLOPT_RETURNTRANSFER => true
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => $HTTP_TIMEOUT,
+        CURLOPT_CONNECTTIMEOUT => $HTTP_CONNECT_TIMEOUT,
+        CURLOPT_SSL_VERIFYPEER => true
     ]);
+    
     $response = curl_exec($ch);
-    if ($response === false) {
-        error_log("Slack notification failed: " . curl_error($ch));
-    } else {
-        error_log("Slack notification sent for {$gempa['datetime']} from $source");
-    }
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
     curl_close($ch);
+    
+    if ($response === false) {
+        log_message('ERROR', "Slack notification failed: $curl_error");
+        return false;
+    }
+    
+    if ($http_code >= 200 && $http_code < 300) {
+        log_message('INFO', "Slack notification sent for {$gempa['datetime']} from $source");
+        return true;
+    } else {
+        log_message('ERROR', "Slack notification failed with HTTP $http_code: $response");
+        return false;
+    }
 }
 
 // Fungsi untuk kirim notifikasi Telegram
 function send_telegram_notification($gempa, $source) {
-    global $TELEGRAM_BOT_TOKEN, $TELEGRAM_CHAT_ID;
+    global $TELEGRAM_BOT_TOKEN, $TELEGRAM_CHAT_ID, $HTTP_TIMEOUT, $HTTP_CONNECT_TIMEOUT;
     
-    error_log("Attempting to send Telegram notification for {$gempa['datetime']} from $source");
+    if (empty($TELEGRAM_BOT_TOKEN) || empty($TELEGRAM_CHAT_ID)) {
+        log_message('WARNING', 'Telegram credentials not configured, skipping notification');
+        return false;
+    }
     
     $title = $source === 'autogempa' ? "Gempa Terbaru" : 
              ($source === 'gempaterkini' ? "Gempa Terkini" : "Gempa Dirasakan");
     
-    $message = "🚨 *{$title} Terdeteksi!* 🚨\n\n" .
-               "*Magnitudo:* M{$gempa['magnitude']}\n" .
-               "*Kedalaman:* {$gempa['kedalaman']}\n" .
-               "*Lokasi:* {$gempa['wilayah']}\n" .
-               "*Waktu:* {$gempa['datetime']}\n" .
-               "*Potensi:* " . ($gempa['potensi'] ?: 'N/A') . "\n" .
-               "*Dirasakan:* " . ($gempa['dirasakan'] ?: 'N/A') . "\n";
+    // Escape semua field untuk keamanan Markdown
+    $magnitude = escape_markdown($gempa['magnitude']);
+    $kedalaman = escape_markdown($gempa['kedalaman']);
+    $wilayah = escape_markdown($gempa['wilayah']);
+    $datetime = escape_markdown($gempa['datetime']);
+    $potensi = escape_markdown($gempa['potensi'] ?: 'N/A');
+    $dirasakan = escape_markdown($gempa['dirasakan'] ?: 'N/A');
+    
+    $message = "🚨 *" . escape_markdown($title) . " Terdeteksi!* 🚨\n\n" .
+               "*Magnitudo:* M{$magnitude}\n" .
+               "*Kedalaman:* {$kedalaman}\n" .
+               "*Lokasi:* {$wilayah}\n" .
+               "*Waktu:* {$datetime}\n" .
+               "*Potensi:* {$potensi}\n" .
+               "*Dirasakan:* {$dirasakan}\n";
 
-    if ($source === 'autogempa' && $gempa['shakemap']) {
-        $message .= "*Shakemap:* https://data.bmkg.go.id/DataMKG/TEWS/{$gempa['shakemap']}\n";
+    if ($source === 'autogempa' && !empty($gempa['shakemap'])) {
+        $shakemap_url = "https://data.bmkg.go.id/DataMKG/TEWS/{$gempa['shakemap']}";
+        $message .= "*Shakemap:* {$shakemap_url}\n";
     }
 
     $url = "https://api.telegram.org/bot{$TELEGRAM_BOT_TOKEN}/sendMessage";
@@ -147,24 +244,39 @@ function send_telegram_notification($gempa, $source) {
     curl_setopt_array($ch, [
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => http_build_query($data),
-        CURLOPT_RETURNTRANSFER => true
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => $HTTP_TIMEOUT,
+        CURLOPT_CONNECTTIMEOUT => $HTTP_CONNECT_TIMEOUT,
+        CURLOPT_SSL_VERIFYPEER => true
     ]);
+    
     $response = curl_exec($ch);
-    if ($response === false) {
-        error_log("Telegram notification failed: " . curl_error($ch));
-    } else {
-        $result = json_decode($response, true);
-        if ($result['ok']) {
-            error_log("Telegram notification sent for {$gempa['datetime']} from $source");
-        } else {
-            error_log("Telegram API error: " . $result['description']);
-        }
-    }
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
     curl_close($ch);
+    
+    if ($response === false) {
+        log_message('ERROR', "Telegram notification failed: $curl_error");
+        return false;
+    }
+    
+    $result = json_decode($response, true);
+    if ($http_code >= 200 && $http_code < 300 && isset($result['ok']) && $result['ok']) {
+        log_message('INFO', "Telegram notification sent for {$gempa['datetime']} from $source");
+        return true;
+    } else {
+        $error_msg = isset($result['description']) ? $result['description'] : "HTTP $http_code";
+        log_message('ERROR', "Telegram API error: $error_msg");
+        return false;
+    }
 }
 
 // Fungsi untuk normalisasi datetime
 function normalize_datetime($datetime) {
+    if (empty($datetime)) {
+        return null;
+    }
+    
     try {
         // Coba beberapa format yang mungkin dari BMKG
         $formats = [
@@ -186,7 +298,7 @@ function normalize_datetime($datetime) {
         $dt = new DateTime($datetime);
         return $dt->format(DateTime::ATOM);
     } catch (Exception $e) {
-        error_log("Failed to normalize datetime: $datetime - " . $e->getMessage());
+        log_message('WARNING', "Failed to normalize datetime: $datetime - " . $e->getMessage());
         return null;
     }
 }
@@ -200,35 +312,32 @@ function is_recent_gempa($datetime) {
         $interval = $now->diff($gempa_time);
         $hours = $interval->h + ($interval->days * 24);
         if ($hours > $MAX_AGE_HOURS) {
-            error_log("Gempa too old: $datetime (age: $hours hours)");
+            log_message('DEBUG', "Gempa too old: $datetime (age: $hours hours)");
             return false;
         }
         return true;
     } catch (Exception $e) {
-        error_log("Failed to check gempa age: $datetime - " . $e->getMessage());
+        log_message('WARNING', "Failed to check gempa age: $datetime - " . $e->getMessage());
         return false;
     }
 }
 
-// Fungsi untuk simpan gempa ke database
+// Fungsi untuk simpan gempa ke database (optimized - langsung INSERT OR IGNORE)
 function save_gempa($db, $gempa, $source) {
     $raw_datetime = isset($gempa->DateTime) ? (string)$gempa->DateTime : null;
-    error_log("Processing gempa from $source with raw datetime: $raw_datetime");
+    
+    if (empty($raw_datetime)) {
+        log_message('WARNING', "Empty datetime for gempa from source $source");
+        return false;
+    }
     
     $datetime = normalize_datetime($raw_datetime);
     if (!$datetime) {
-        error_log("Invalid datetime for gempa from source $source: $raw_datetime");
+        log_message('WARNING', "Invalid datetime for gempa from source $source: $raw_datetime");
         return false;
     }
 
-    // Periksa apakah gempa sudah ada
-    $stmt = $db->prepare("SELECT id FROM gempa WHERE datetime = :datetime AND source = :source");
-    $stmt->execute([':datetime' => $datetime, ':source' => $source]);
-    if ($stmt->fetch()) {
-        error_log("Gempa already exists: $datetime from $source");
-        return false;
-    }
-
+    // Langsung INSERT OR IGNORE (lebih efisien daripada cek dulu)
     $stmt = $db->prepare("INSERT OR IGNORE INTO gempa (
         datetime, tanggal, jam, magnitude, kedalaman, wilayah, lintang, bujur, 
         coordinates, potensi, dirasakan, shakemap, source
@@ -253,194 +362,198 @@ function save_gempa($db, $gempa, $source) {
         ':source' => $source
     ];
     
-    $stmt->execute($data);
-    $is_new = $db->lastInsertId() > 0;
-    if ($is_new) {
-        error_log("New gempa saved: $datetime from $source");
+    try {
+        $stmt->execute($data);
+        $is_new = $db->lastInsertId() > 0;
+        if ($is_new) {
+            log_message('INFO', "New gempa saved: $datetime from $source");
+        }
+        return $is_new;
+    } catch (PDOException $e) {
+        // Jika error karena duplicate, return false (bukan error)
+        if (strpos($e->getMessage(), 'UNIQUE constraint') !== false) {
+            return false;
+        }
+        log_message('ERROR', "Database error saving gempa: " . $e->getMessage());
+        return false;
     }
-    return $is_new;
 }
 
-// Fungsi untuk mengambil data dengan retry
+// Fungsi untuk mengambil data XML dengan retry menggunakan cURL
 function fetch_xml_with_retry($url, $source) {
-    global $RETRY_ATTEMPTS, $RETRY_DELAY;
+    global $RETRY_ATTEMPTS, $RETRY_DELAY, $HTTP_TIMEOUT, $HTTP_CONNECT_TIMEOUT;
     
     for ($attempt = 1; $attempt <= $RETRY_ATTEMPTS; $attempt++) {
-        $data = simplexml_load_file($url);
-        if ($data !== false) {
-            return $data;
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $HTTP_TIMEOUT,
+            CURLOPT_CONNECTTIMEOUT => $HTTP_CONNECT_TIMEOUT,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 3
+        ]);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curl_error = curl_error($ch);
+        curl_close($ch);
+        
+        if ($response === false) {
+            log_message('WARNING', "Attempt $attempt failed for $source: $curl_error");
+        } elseif ($http_code >= 200 && $http_code < 300) {
+            // Parse XML dari response
+            libxml_use_internal_errors(true);
+            $data = simplexml_load_string($response);
+            if ($data !== false) {
+                log_message('DEBUG', "Successfully fetched $source data");
+                return $data;
+            } else {
+                $xml_errors = libxml_get_errors();
+                $error_msg = !empty($xml_errors) ? $xml_errors[0]->message : 'Invalid XML';
+                log_message('WARNING', "Attempt $attempt failed for $source: Invalid XML - $error_msg");
+                libxml_clear_errors();
+            }
+        } else {
+            log_message('WARNING', "Attempt $attempt failed for $source: HTTP $http_code");
         }
-        error_log("Attempt $attempt failed for $source: Unable to load $url");
+        
         if ($attempt < $RETRY_ATTEMPTS) {
             sleep($RETRY_DELAY);
         }
     }
-    error_log("$source error: Failed to load $url after $RETRY_ATTEMPTS attempts");
+    
+    log_message('ERROR', "$source error: Failed to load $url after $RETRY_ATTEMPTS attempts");
     return false;
 }
 
-// Fungsi untuk proses data autogempa
-function process_autogempa($db, $is_first_run) {
+// Fungsi generic untuk proses data gempa dari berbagai sumber
+function process_gempa_source($db, $source, $is_single_item = false) {
     global $DATA_URLS, $SEND_TO_SLACK, $SEND_TO_TELEGRAM;
     $new_gempa = [];
     
     try {
-        $data = fetch_xml_with_retry($DATA_URLS['autogempa'], 'autogempa');
-        if ($data === false) {
-            throw new Exception("Failed to load autogempa.xml");
-        }
-        if (save_gempa($db, $data->gempa, 'autogempa')) {
-            $datetime = normalize_datetime((string)$data->gempa->DateTime);
-            if ($datetime && is_recent_gempa($datetime)) {
-                $new_gempa[] = [
-                    'datetime' => $datetime,
-                    'magnitude' => (string)$data->gempa->Magnitude,
-                    'kedalaman' => (string)$data->gempa->Kedalaman,
-                    'wilayah' => (string)$data->gempa->Wilayah,
-                    'potensi' => (string)$data->gempa->Potensi,
-                    'dirasakan' => (string)$data->gempa->Dirasakan,
-                    'shakemap' => (string)$data->gempa->Shakemap
-                ];
-            }
-        }
-
-        if (!empty($new_gempa)) {
-            foreach ($new_gempa as $gempa) {
-                if ($SEND_TO_SLACK) {
-                    send_slack_notification($gempa, 'autogempa');
-                }
-                if ($SEND_TO_TELEGRAM) {
-                    send_telegram_notification($gempa, 'autogempa');
-                }
-            }
+        if (!isset($DATA_URLS[$source])) {
+            log_message('ERROR', "Unknown source: $source");
+            return 0;
         }
         
-        echo "[" . date('Y-m-d H:i:s') . "] Autogempa checked. New events: " . count($new_gempa) . "\n";
-        return count($new_gempa);
-    } catch (Exception $e) {
-        error_log("Autogempa error: " . $e->getMessage());
-        return 0;
-    }
-}
-
-// Fungsi untuk proses data gempaterkini
-function process_gempaterkini($db, $is_first_run) {
-    global $DATA_URLS, $SEND_TO_SLACK, $SEND_TO_TELEGRAM;
-    $new_gempa = [];
-    
-    try {
-        $data = fetch_xml_with_retry($DATA_URLS['gempaterkini'], 'gempaterkini');
+        $data = fetch_xml_with_retry($DATA_URLS[$source], $source);
         if ($data === false) {
-            throw new Exception("Failed to load gempaterkini.xml");
+            throw new Exception("Failed to load data for $source");
         }
-        foreach ($data->gempa as $gempa) {
-            if (save_gempa($db, $gempa, 'gempaterkini')) {
+        
+        // Handle single item (autogempa) vs multiple items (gempaterkini, gempadirasakan)
+        $items = $is_single_item ? [$data->gempa] : $data->gempa;
+        
+        foreach ($items as $gempa) {
+            if (save_gempa($db, $gempa, $source)) {
                 $datetime = normalize_datetime((string)$gempa->DateTime);
                 if ($datetime && is_recent_gempa($datetime)) {
-                    $new_gempa[] = [
+                    $gempa_data = [
                         'datetime' => $datetime,
                         'magnitude' => (string)$gempa->Magnitude,
                         'kedalaman' => (string)$gempa->Kedalaman,
                         'wilayah' => (string)$gempa->Wilayah,
-                        'potensi' => (string)$gempa->Potensi,
-                        'dirasakan' => '',
-                        'shakemap' => ''
+                        'potensi' => $source === 'gempadirasakan' ? '' : (string)$gempa->Potensi,
+                        'dirasakan' => $source === 'gempaterkini' ? '' : (string)$gempa->Dirasakan,
+                        'shakemap' => $source === 'autogempa' ? (string)$gempa->Shakemap : ''
                     ];
+                    $new_gempa[] = $gempa_data;
                 }
             }
         }
 
+        // Kirim notifikasi untuk gempa baru
         if (!empty($new_gempa)) {
             foreach ($new_gempa as $gempa) {
                 if ($SEND_TO_SLACK) {
-                    send_slack_notification($gempa, 'gempaterkini');
+                    send_slack_notification($gempa, $source);
                 }
                 if ($SEND_TO_TELEGRAM) {
-                    send_telegram_notification($gempa, 'gempaterkini');
+                    send_telegram_notification($gempa, $source);
                 }
             }
         }
         
-        echo "[" . date('Y-m-d H:i:s') . "] Gempaterkini checked. New events: " . count($new_gempa) . "\n";
-        return count($new_gempa);
+        $count = count($new_gempa);
+        $source_name = ucfirst($source);
+        log_message('INFO', "$source_name checked. New events: $count");
+        echo "[" . date('Y-m-d H:i:s') . "] $source_name checked. New events: $count\n";
+        return $count;
     } catch (Exception $e) {
-        error_log("Gempaterkini error: " . $e->getMessage());
-        return 0;
-    }
-}
-
-// Fungsi untuk proses data gempadirasakan
-function process_gempadirasakan($db, $is_first_run) {
-    global $DATA_URLS, $SEND_TO_SLACK, $SEND_TO_TELEGRAM;
-    $new_gempa = [];
-    
-    try {
-        $data = fetch_xml_with_retry($DATA_URLS['gempadirasakan'], 'gempadirasakan');
-        if ($data === false) {
-            throw new Exception("Failed to load gempadirasakan.xml");
-        }
-        foreach ($data->gempa as $gempa) {
-            if (save_gempa($db, $gempa, 'gempadirasakan')) {
-                $datetime = normalize_datetime((string)$gempa->DateTime);
-                if ($datetime && is_recent_gempa($datetime)) {
-                    $new_gempa[] = [
-                        'datetime' => $datetime,
-                        'magnitude' => (string)$gempa->Magnitude,
-                        'kedalaman' => (string)$gempa->Kedalaman,
-                        'wilayah' => (string)$gempa->Wilayah,
-                        'potensi' => '',
-                        'dirasakan' => (string)$gempa->Dirasakan,
-                        'shakemap' => ''
-                    ];
-                }
-            }
-        }
-
-        if (!empty($new_gempa)) {
-            foreach ($new_gempa as $gempa) {
-                if ($SEND_TO_SLACK) {
-                    send_slack_notification($gempa, 'gempadirasakan');
-                }
-                if ($SEND_TO_TELEGRAM) {
-                    send_telegram_notification($gempa, 'gempadirasakan');
-                }
-            }
-        }
-        
-        echo "[" . date('Y-m-d H:i:s') . "] Gempadirasakan checked. New events: " . count($new_gempa) . "\n";
-        return count($new_gempa);
-    } catch (Exception $e) {
-        error_log("Gempadirasakan error: " . $e->getMessage());
+        log_message('ERROR', "$source error: " . $e->getMessage());
         return 0;
     }
 }
 
 // Fungsi utama untuk proses semua sumber
-function process_gempa_data($db, $is_first_run = false) {
+function process_gempa_data($db) {
+    global $shutdown_requested;
     $total_new = 0;
-    $total_new += process_autogempa($db, $is_first_run);
-    sleep(1); // Jeda antar permintaan
-    $total_new += process_gempaterkini($db, $is_first_run);
-    sleep(1); // Jeda antar permintaan
-    $total_new += process_gempadirasakan($db, $is_first_run);
     
+    // Process autogempa (single item)
+    $total_new += process_gempa_source($db, 'autogempa', true);
+    
+    if ($shutdown_requested) {
+        return $total_new;
+    }
+    
+    sleep(1); // Jeda antar permintaan
+    
+    // Process gempaterkini (multiple items)
+    $total_new += process_gempa_source($db, 'gempaterkini', false);
+    
+    if ($shutdown_requested) {
+        return $total_new;
+    }
+    
+    sleep(1); // Jeda antar permintaan
+    
+    // Process gempadirasakan (multiple items)
+    $total_new += process_gempa_source($db, 'gempadirasakan', false);
+    
+    log_message('INFO', "Total new events: $total_new");
     echo "[" . date('Y-m-d H:i:s') . "] Total new events: $total_new\n";
+    return $total_new;
 }
 
 // Main Logic
 try {
+    // Validasi konfigurasi
+    if (!validate_config()) {
+        log_message('ERROR', 'Configuration validation failed. Please check your environment variables.');
+        exit(1);
+    }
+    
+    log_message('INFO', 'Starting gempa monitor...');
     $db = init_db();
     
     // Proses pertama kali
-    process_gempa_data($db, true);
+    process_gempa_data($db);
     
-    // Loop untuk pengecekan berkala
-    while (true) {
+    // Loop untuk pengecekan berkala dengan graceful shutdown
+    global $CHECK_INTERVAL, $shutdown_requested;
+    while (!$shutdown_requested) {
+        // Handle signals jika menggunakan pcntl
+        if (function_exists('pcntl_signal_dispatch')) {
+            pcntl_signal_dispatch();
+        }
+        
+        if ($shutdown_requested) {
+            break;
+        }
+        
         sleep($CHECK_INTERVAL);
-        process_gempa_data($db, false);
+        
+        if (!$shutdown_requested) {
+            process_gempa_data($db);
+        }
     }
+    
+    log_message('INFO', 'Gempa monitor stopped gracefully');
 } catch (Exception $e) {
-    error_log("Fatal Error: " . $e->getMessage());
+    log_message('ERROR', "Fatal Error: " . $e->getMessage());
     exit(1);
 }
 ?>

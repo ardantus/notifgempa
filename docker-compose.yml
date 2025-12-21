@@ -15,6 +15,15 @@ services:
       - 8.8.8.8
       - 8.8.4.4
     restart: unless-stopped
-
-volumes:
-  gempa_data:
+    healthcheck:
+      test: ["CMD", "php", "-r", "file_exists('/data/gempa.db') || exit(1);"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M

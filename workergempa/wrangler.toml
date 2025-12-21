@@ -1,0 +1,21 @@
+name = "gempa-monitor"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "gempa-db"
+database_id = "YOUR_DATABASE_ID_HERE"  # Ganti dengan database ID setelah dibuat
+
+# Cron Triggers - jalankan setiap ~3.3 menit (200 detik)
+# Note: Cloudflare Workers Cron minimum adalah 1 menit, jadi kita set ke 3 menit
+# atau gunakan multiple cron dengan interval berbeda
+triggers = { crons = ["*/3 * * * *"] }  # Setiap 3 menit
+
+# Environment variables (untuk development)
+# Untuk production, gunakan: wrangler secret put <NAME>
+[vars]
+SEND_TO_SLACK = "true"
+SEND_TO_TELEGRAM = "true"
+# SLACK_WEBHOOK, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID harus di-set sebagai secrets
