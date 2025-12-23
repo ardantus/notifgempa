@@ -1,8 +1,8 @@
 // Konfigurasi
 const DATA_URLS = {
-  gempaterkini: 'https://data.bmkg.go.id/DataMKG/TEWS/gempaterkini.xml',
-  autogempa: 'https://data.bmkg.go.id/DataMKG/TEWS/autogempa.xml',
-  gempadirasakan: 'https://data.bmkg.go.id/DataMKG/TEWS/gempadirasakan.xml'
+  gempaterkini: 'https://data.bmkg.go.id/DataMKG/TEWS/gempaterkini.json',
+  autogempa: 'https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json',
+  gempadirasakan: 'https://data.bmkg.go.id/DataMKG/TEWS/gempadirasakan.json'
 };
 
 const RETRY_ATTEMPTS = 3;
@@ -42,8 +42,11 @@ function validateConfig(env) {
 // Inisialisasi database D1
 async function initDb(db) {
   try {
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS gempa (
+    if (!db || typeof db.exec !== 'function') {
+      throw new Error('DB binding is undefined or invalid (env.DB)');
+    }
+
+    const ddl = `CREATE TABLE IF NOT EXISTS gempa (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         datetime TEXT,
         tanggal TEXT,
@@ -59,8 +62,10 @@ async function initDb(db) {
         shakemap TEXT,
         source TEXT,
         UNIQUE(datetime, source)
-      )
-    `);
+      );`;
+
+    // Gunakan prepare().run() agar hasil objek tidak undefined di lingkungan D1
+    await db.prepare(ddl).run();
     logMessage('INFO', 'Database initialized successfully');
     return true;
   } catch (error) {
@@ -367,53 +372,8 @@ async function saveGempa(db, gempa, source) {
   }
 }
 
-// Parse XML response menjadi object
-function parseXML(xmlText) {
-  // Simple XML parser untuk struktur BMKG
-  // Note: Untuk production, pertimbangkan menggunakan library XML parser
-  const parser = new DOMParser();
-  const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
-
-  // Check for parsing errors
-  const parserError = xmlDoc.querySelector('parsererror');
-  if (parserError) {
-    throw new Error('XML parsing error: ' + parserError.textContent);
-  }
-
-  return xmlDoc;
-}
-
-// Convert XML element ke object JavaScript
-function xmlToObject(xmlElement) {
-  // Jika element tidak punya children, return text content
-  if (!xmlElement.children || xmlElement.children.length === 0) {
-    return xmlElement.textContent ? xmlElement.textContent.trim() : '';
-  }
-
-  const obj = {};
-
-  // Get child elements
-  const children = xmlElement.children;
-  for (let child of children) {
-    const childName = child.tagName;
-    const childValue = xmlToObject(child);
-
-    if (obj[childName]) {
-      // Multiple children with same name - convert to array
-      if (!Array.isArray(obj[childName])) {
-        obj[childName] = [obj[childName]];
-      }
-      obj[childName].push(childValue);
-    } else {
-      obj[childName] = childValue;
-    }
-  }
-
-  return obj;
-}
-
-// Fungsi untuk mengambil data XML dengan retry
-async function fetchXMLWithRetry(url, source) {
+// Fungsi untuk mengambil data JSON dengan retry
+async function fetchJsonWithRetry(url, source) {
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
     try {
       const controller = new AbortController();
@@ -436,9 +396,9 @@ async function fetchXMLWithRetry(url, source) {
         continue;
       }
 
-      const xmlText = await response.text();
+      const json = await response.json();
       logMessage('DEBUG', `Successfully fetched ${source} data`);
-      return xmlText;
+      return json;
     } catch (error) {
       if (error.name === 'AbortError') {
         logMessage('WARNING', `Attempt ${attempt} failed for ${source}: Request timeout`);
@@ -467,35 +427,31 @@ async function processGempaSource(db, source, isSingleItem, env) {
       return 0;
     }
 
-    const xmlText = await fetchXMLWithRetry(DATA_URLS[source], source);
-    if (!xmlText) {
+    const data = await fetchJsonWithRetry(DATA_URLS[source], source);
+    if (!data) {
       throw new Error(`Failed to load data for ${source}`);
     }
 
-    // Parse XML
-    const xmlDoc = parseXML(xmlText);
-
-    // Handle single item (autogempa) vs multiple items (gempaterkini, gempadirasakan)
-    // Struktur XML BMKG: <Infogempa><gempa>...</gempa></Infogempa>
+    // Struktur JSON BMKG: { Infogempa: { gempa: {...} atau [...] } }
+    const info = data?.Infogempa;
     let items = [];
-    const rootElement = xmlDoc.documentElement;
-    
+
     if (isSingleItem) {
-      // autogempa: single gempa element
-      const gempaElement = rootElement.querySelector('gempa');
-      if (gempaElement) {
-        items = [xmlToObject(gempaElement)];
-      }
+      const gempa = info?.gempa;
+      items = gempa ? [gempa] : [];
     } else {
-      // gempaterkini/gempadirasakan: multiple gempa elements
-      const gempaElements = rootElement.querySelectorAll('gempa');
-      items = Array.from(gempaElements).map(el => xmlToObject(el));
+      const list = info?.gempa;
+      if (Array.isArray(list)) {
+        items = list;
+      } else if (list) {
+        items = [list];
+      }
     }
 
     for (const gempa of items) {
       // Normalize gempa object structure
       const gempaObj = {
-        DateTime: gempa.DateTime || gempa.text,
+        DateTime: gempa.DateTime,
         Tanggal: gempa.Tanggal,
         Jam: gempa.Jam,
         Magnitude: gempa.Magnitude,

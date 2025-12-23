@@ -1,1 +1,14 @@
 .env
+.hermit/
+# ignore bin and subdirectories
+bin
+**/bin/**
+
+# ignore node_modules everywhere
+node_modules
+**/node_modules/**
+workergempa/dist
+
+# ignore wrangler.toml everywhere (use wrangler.toml.example instead)
+wrangler.toml
+workergempa/wrangler.toml

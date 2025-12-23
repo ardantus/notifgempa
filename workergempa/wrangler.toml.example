@@ -4,14 +4,15 @@ compatibility_date = "2024-01-01"
 
 # D1 Database binding
 [[d1_databases]]
-binding = "DB"
+binding = "DB"                                  # Sesuaikan dengan env.DB di kode
 database_name = "gempa-db"
-database_id = "YOUR_DATABASE_ID_HERE"  # Ganti dengan database ID setelah dibuat
+database_id = "f6098dd8-abcde-1234-8753-abcdehfskde"  # Ganti jika database berbeda
 
 # Cron Triggers - jalankan setiap ~3.3 menit (200 detik)
 # Note: Cloudflare Workers Cron minimum adalah 1 menit, jadi kita set ke 3 menit
 # atau gunakan multiple cron dengan interval berbeda
-triggers = { crons = ["*/3 * * * *"] }  # Setiap 3 menit
+[triggers]
+crons = ["*/3 * * * *"]  # Setiap 3 menit
 
 # Environment variables (untuk development)
 # Untuk production, gunakan: wrangler secret put <NAME>
