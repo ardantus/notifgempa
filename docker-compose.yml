@@ -9,6 +9,8 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - SEND_TO_SLACK=${SEND_TO_SLACK}
       - SEND_TO_TELEGRAM=${SEND_TO_TELEGRAM}
+      - CUACA_WILAYAH=${CUACA_WILAYAH}
+      - CUACA_WILAYAH=${CUACA_WILAYAH:-34.71.08.1001,34.02.10.2001,34.02.15.2004,34.02.01.2001}
     volumes:
       - ./data:/data
     dns:

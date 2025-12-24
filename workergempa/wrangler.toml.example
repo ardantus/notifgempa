@@ -15,8 +15,17 @@ database_id = "f6098dd8-abcde-1234-8753-abcdehfskde"  # Ganti jika database berb
 crons = ["*/3 * * * *"]  # Setiap 3 menit
 
 # Environment variables (untuk development)
-# Untuk production, gunakan: wrangler secret put <NAME>
+# Untuk production, gunakan: wrangler secret put <NAME> untuk secrets
+# atau set via Cloudflare Dashboard untuk vars
 [vars]
 SEND_TO_SLACK = "true"
 SEND_TO_TELEGRAM = "true"
-# SLACK_WEBHOOK, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID harus di-set sebagai secrets
+# Kode wilayah adm4 untuk prakiraan cuaca (comma-separated)
+# Contoh wilayah: Umbulharjo (Kota Yogyakarta), Piyungan & Banguntapan & Bantul (Kab. Bantul)
+# Lihat KODE_WILAYAH_YOGYAKARTA.md untuk daftar lengkap dan sesuaikan
+CUACA_WILAYAH = "34.71.08.1001,34.02.10.2001,34.02.15.2004,34.02.01.2001"
+
+# Secrets (harus di-set via: wrangler secret put <NAME>)
+# SLACK_WEBHOOK = "https://hooks.slack.com/services/..."
+# TELEGRAM_BOT_TOKEN = "your_bot_token"
+# TELEGRAM_CHAT_ID = "your_chat_id"

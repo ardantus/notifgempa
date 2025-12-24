@@ -4,9 +4,11 @@ Versi Cloudflare Worker dari aplikasi monitoring gempa BMKG. Aplikasi ini berjal
 
 ## Fitur
 
-- ✅ Fetch data gempa dari BMKG (autogempa, gempaterkini, gempadirasakan)
+- ✅ **Monitoring Gempa** - Fetch data gempa dari BMKG (autogempa, gempaterkini, gempadirasakan)
+- ✅ **Peringatan Dini Cuaca** - Monitor peringatan dini cuaca real-time dari BMKG (setiap 5 menit)
+- ✅ **Prakiraan Cuaca** - Monitor prakiraan cuaca untuk wilayah tertentu (setiap 60 menit)
 - ✅ Menyimpan data ke D1 Database dengan deduplication
-- ✅ Mengirim notifikasi ke Slack dan Telegram untuk gempa baru
+- ✅ Mengirim notifikasi ke Slack dan Telegram untuk gempa baru, peringatan dini, dan cuaca ekstrem
 - ✅ Scheduled execution menggunakan Cron Triggers (setiap 3 menit)
 - ✅ Manual trigger via HTTP endpoint
 - ✅ Health check endpoint
@@ -51,7 +53,9 @@ wrangler d1 create gempa-db
 wrangler d1 execute gempa-db --file=schema.sql
 ```
 
-### 5. Set Environment Variables (Secrets)
+### 5. Set Environment Variables
+
+#### A. Set Secrets (untuk data sensitif)
 
 ```bash
 # Set Slack Webhook
@@ -65,18 +69,48 @@ wrangler secret put TELEGRAM_BOT_TOKEN
 # Set Telegram Chat ID
 wrangler secret put TELEGRAM_CHAT_ID
 # Paste chat ID saat diminta
-
-# Set flags (optional, default: true)
-wrangler secret put SEND_TO_SLACK
-# Ketik: true
-
-wrangler secret put SEND_TO_TELEGRAM
-# Ketik: true
 ```
+
+#### B. Set Environment Variables (bisa via wrangler.toml atau deploy command)
+
+**Opsi 1: Via wrangler.toml** (disarankan untuk development)
+
+Edit `wrangler.toml` dan tambahkan di section `[vars]`:
+
+```toml
+[vars]
+SEND_TO_SLACK = "true"
+SEND_TO_TELEGRAM = "true"
+CUACA_WILAYAH = "34.71.01.1001,34.04.07.1001"  # Kode wilayah adm4 (comma-separated)
+```
+
+**Opsi 2: Via deploy command**
+
+```bash
+npx wrangler deploy --var SEND_TO_SLACK="true" --var SEND_TO_TELEGRAM="true" --var CUACA_WILAYAH="34.71.01.1001,34.04.07.1001"
+```
+
+**Opsi 3: Via Cloudflare Dashboard**
+
+1. Buka [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. Pilih Workers & Pages → gempa-monitor
+3. Settings → Variables → Environment Variables
+4. Tambah variables:
+   - `SEND_TO_SLACK` = `true`
+   - `SEND_TO_TELEGRAM` = `true`
+   - `CUACA_WILAYAH` = `34.71.01.1001,34.04.07.1001` (sesuaikan dengan wilayah yang ingin dimonitor)
+
+**Catatan Kode Wilayah (adm4):**
+- Format: `XX.XX.XX.XXXX` (contoh: `34.71.01.1001` untuk Gondomanan, Yogyakarta)
+- Lihat daftar lengkap di `KODE_WILAYAH_YOGYAKARTA.md`
+- Multiple wilayah: pisahkan dengan koma (contoh: `34.71.01.1001,34.04.07.1001,34.02.01.2001`)
 
 ### 6. Update wrangler.toml
 
-Edit `wrangler.toml` dan ganti `YOUR_DATABASE_ID_HERE` dengan database ID yang didapat dari step 3.
+Edit `wrangler.toml` (copy dari `wrangler.toml.example` jika belum ada) dan:
+- Ganti `YOUR_DATABASE_ID_HERE` dengan database ID yang didapat dari step 3
+- Pastikan binding = `"DB"` (bukan `"gempa_db"`)
+- Tambahkan `CUACA_WILAYAH` di section `[vars]` jika menggunakan Opsi 1
 
 ## Development
 
@@ -104,8 +138,14 @@ curl http://localhost:8787/health
 
 ### Deploy ke Cloudflare
 
+**Dengan environment variables di wrangler.toml:**
 ```bash
 npm run deploy
+```
+
+**Dengan environment variables via command:**
+```bash
+npx wrangler deploy --var SEND_TO_SLACK="true" --var SEND_TO_TELEGRAM="true" --var CUACA_WILAYAH="34.71.01.1001,34.04.07.1001"
 ```
 
 ### View Logs
@@ -114,23 +154,47 @@ npm run deploy
 npm run tail
 ```
 
+Log akan menampilkan:
+- ✅ Gempa monitoring (setiap 3 menit)
+- ✅ Peringatan dini cuaca (setiap 5 menit)
+- ✅ Prakiraan cuaca (setiap 60 menit)
+
 ## Konfigurasi Cron Trigger
 
 Cron trigger dikonfigurasi di `wrangler.toml`:
 
 ```toml
-triggers = { crons = ["*/3 * * * *"] }  # Setiap 3 menit
+[triggers]
+crons = ["*/3 * * * *"]  # Setiap 3 menit
 ```
 
-**Catatan**: Cloudflare Workers Cron minimum adalah 1 menit. Jika ingin interval yang lebih pendek, pertimbangkan menggunakan multiple cron triggers atau service yang berbeda.
+**Catatan**: Cloudflare Workers Cron minimum adalah 1 menit.
 
-Format cron: `minute hour day month weekday`
+### Interval Internal (di dalam kode)
+
+Worker dipanggil setiap 3 menit, tapi fitur dijalankan dengan interval berbeda:
+
+| Fitur | Interval | Keterangan |
+|-------|----------|------------|
+| **Gempa** | Setiap 3 menit | Selalu dijalankan setiap cron trigger |
+| **Peringatan Dini** | Setiap 5 menit | Dijalankan saat `minute % 5 === 0` |
+| **Prakiraan Cuaca** | Setiap 60 menit | Dijalankan saat `minute % 60 === 0` |
+
+**Format cron**: `minute hour day month weekday`
 
 Contoh:
-- `*/3 * * * *` - Setiap 3 menit
+- `*/3 * * * *` - Setiap 3 menit (default)
 - `*/5 * * * *` - Setiap 5 menit
 - `0 * * * *` - Setiap jam
 - `0 */6 * * *` - Setiap 6 jam
+
+**Mengubah Interval Internal:**
+
+Edit konstanta di `src/index.js`:
+```javascript
+const WARNING_INTERVAL_MIN = 5;  // Ubah untuk peringatan dini
+const WEATHER_INTERVAL_MIN = 60; // Ubah untuk prakiraan cuaca
+```
 
 ## Endpoints
 
@@ -185,6 +249,7 @@ workergempa/
 
 ### Database tidak terhubung
 - Pastikan `database_id` di `wrangler.toml` sudah benar
+- Pastikan binding = `"DB"` (bukan `"gempa_db"`)
 - Pastikan database sudah dibuat dengan `wrangler d1 create`
 - Pastikan schema sudah dijalankan dengan `wrangler d1 execute`
 
@@ -198,10 +263,24 @@ workergempa/
 - Cek cron triggers di Cloudflare Dashboard
 - Minimum interval adalah 1 menit
 
-### XML parsing error
-- BMKG mungkin mengubah format XML
-- Cek response XML dengan manual fetch
-- Update `xmlToObject()` function jika diperlukan
+### Prakiraan cuaca tidak jalan
+- Pastikan `CUACA_WILAYAH` sudah di-set (cek dengan `wrangler tail`)
+- Pastikan kode wilayah (adm4) valid (lihat `KODE_WILAYAH_YOGYAKARTA.md`)
+- Cek format: comma-separated, tanpa spasi (contoh: `34.71.01.1001,34.04.07.1001`)
+- Prakiraan cuaca hanya jalan setiap 60 menit (saat `minute % 60 === 0`)
+
+### Peringatan dini tidak jalan
+- Peringatan dini hanya jalan setiap 5 menit (saat `minute % 5 === 0`)
+- Cek logs untuk error RSS parsing
+- Pastikan endpoint BMKG masih accessible
+
+### Error "DATA_URLS is not defined"
+- Pastikan sudah deploy versi terbaru (sudah diubah ke `GEMPA_URLS`)
+- Redeploy dengan `npm run deploy`
+
+### Error "Cannot read properties of undefined (reading 'duration')"
+- Pastikan binding D1 = `"DB"` di `wrangler.toml`
+- Redeploy worker setelah update binding
 
 ## Monitoring
 
@@ -222,14 +301,22 @@ Cloudflare Workers pricing (per 2024):
 - **Free Tier**: 100,000 requests/hari
 - **Paid Tier**: $5/month untuk 10M requests
 
-Dengan cron setiap 3 menit:
-- 20 requests/jam
-- 480 requests/hari
-- **Masih dalam free tier!**
+### Perhitungan Request per Hari:
+
+| Fitur | Interval | Request per Hari |
+|-------|----------|------------------|
+| Gempa (3 feed) | Setiap 3 menit | ~1,440 requests |
+| Peringatan Dini | Setiap 5 menit | ~288 requests |
+| Prakiraan Cuaca (6 wilayah) | Setiap 60 menit | ~144 requests |
+| **Total** | | **~1,872 requests/hari** |
+
+✅ **Masih dalam free tier!** (100K requests/hari)
 
 D1 Database pricing:
 - **Free Tier**: 5GB storage, 5M reads/hari, 100K writes/hari
 - **Paid Tier**: $0.001 per 1M reads, $1.00 per 1M writes
+
+**Catatan**: Jika menambah banyak wilayah cuaca, pertimbangkan untuk mengurangi interval atau jumlah wilayah untuk tetap dalam free tier.
 
 ## License
 
