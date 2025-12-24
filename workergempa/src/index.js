@@ -407,10 +407,19 @@ async function saveGempa(db, gempa, source) {
     return false;
   }
 
+  // Cek dulu apakah data sudah ada (berdasarkan datetime dan source)
+  const checkStmt = db.prepare('SELECT COUNT(*) as count FROM gempa WHERE datetime = ? AND source = ?');
+  const checkResult = await checkStmt.bind(datetime, source).first();
+  const exists = checkResult && checkResult.count > 0;
+  
+  if (exists) {
+    logMessage('DEBUG', `Gempa already exists: ${datetime} from ${source}`);
+    return false; // Data sudah ada, tidak perlu insert
+  }
+
   try {
-    // Langsung INSERT OR IGNORE
     const result = await db.prepare(`
-      INSERT OR IGNORE INTO gempa (
+      INSERT INTO gempa (
         datetime, tanggal, jam, magnitude, kedalaman, wilayah, lintang, bujur,
         coordinates, potensi, dirasakan, shakemap, source
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -423,21 +432,24 @@ async function saveGempa(db, gempa, source) {
       gempa.Wilayah || null,
       gempa.Lintang || null,
       gempa.Bujur || null,
-      gempa.point?.coordinates || null,
-      gempa.Potensi || null,
-      gempa.Dirasakan || null,
-      gempa.Shakemap || null,
+      gempa.point?.coordinates ? JSON.stringify(gempa.point.coordinates) : null,
+      source === 'gempadirasakan' ? null : (gempa.Potensi || null),
+      source === 'gempaterkini' ? null : (gempa.Dirasakan || null),
+      source === 'autogempa' ? (gempa.Shakemap || null) : null,
       source
     ).run();
 
     if (result.meta.changes > 0) {
-      logMessage('INFO', `New gempa saved: ${datetime} from ${source}`);
+      logMessage('DEBUG', `New gempa saved: ${datetime} from ${source}`);
       return true;
+    } else {
+      logMessage('WARNING', `Failed to save gempa: ${datetime} from ${source} (rowCount: ${result.meta.changes})`);
+      return false;
     }
-    return false;
   } catch (error) {
     // Jika error karena duplicate, return false (bukan error)
     if (error.message && error.message.includes('UNIQUE constraint')) {
+      logMessage('DEBUG', `Gempa duplicate (UNIQUE constraint): ${datetime} from ${source}`);
       return false;
     }
     logMessage('ERROR', `Database error saving gempa: ${error.message}`);
@@ -737,6 +749,27 @@ async function processWarnings(db, env) {
   return newCount;
 }
 
+// Fungsi untuk mendapatkan nama wilayah dari kode adm4
+function getWilayahName(adm4) {
+  // Mapping kode wilayah ke nama (untuk wilayah yang umum digunakan)
+  const wilayahMap = {
+    '34.71.08.1001': 'Umbulharjo, Kota Yogyakarta',
+    '34.02.10.2001': 'Piyungan, Bantul',
+    '34.02.15.2004': 'Banguntapan, Bantul',
+    '34.02.01.2001': 'Bantul, Bantul',
+    '34.71.01.1001': 'Gondomanan, Kota Yogyakarta',
+    '34.71.02.1001': 'Gedongtengen, Kota Yogyakarta',
+    '34.71.03.1001': 'Bausasran, Kota Yogyakarta',
+    '34.71.04.1001': 'Baciro, Kota Yogyakarta',
+    '34.04.07.1001': 'Caturtunggal, Sleman',
+    '34.04.07.1002': 'Condongcatur, Sleman',
+    '34.04.07.1003': 'Depok, Sleman',
+    '34.04.07.1004': 'Maguwoharjo, Sleman',
+  };
+  
+  return wilayahMap[adm4] || adm4; // Return nama jika ada, atau kode jika tidak ada
+}
+
 // Cek apakah cuaca ekstrem
 function isExtremeWeather(forecast) {
   const weatherDesc = (forecast.weather_desc || '').toLowerCase();
@@ -825,6 +858,7 @@ async function processWeather(db, env) {
   let newCount = 0;
   const allNewForecasts = [];
   const allExtremeForecasts = [];
+  const wilayahInfo = {}; // Store wilayah info from API response
   
   for (const adm4 of list) {
     try {
@@ -835,6 +869,24 @@ async function processWeather(db, env) {
       if (!data) {
         logMessage('WARNING', `Failed to fetch weather data for ${adm4}`);
         continue;
+      }
+      
+      // Simpan informasi lokasi dari response API
+      if (data.lokasi) {
+        const lokasi = data.lokasi;
+        const desa = lokasi.desa || '';
+        const kecamatan = lokasi.kecamatan || '';
+        const kotkab = lokasi.kotkab || '';
+        
+        // Format: Desa, Kecamatan, Kabupaten/Kota
+        const namaWilayah = [desa, kecamatan, kotkab].filter(Boolean).join(', ');
+        if (namaWilayah) {
+          wilayahInfo[adm4] = namaWilayah;
+        } else {
+          wilayahInfo[adm4] = getWilayahName(adm4);
+        }
+      } else {
+        wilayahInfo[adm4] = getWilayahName(adm4);
       }
       
       // Struktur BMKG: { lokasi: {...}, data: [{ lokasi: {...}, cuaca: [[{forecast1}, {forecast2}, ...]] }] }
@@ -906,8 +958,10 @@ async function processWeather(db, env) {
         for (const result of extremeForecasts) {
           const f = result.forecast;
           const wilayahCode = result.adm4;
+          const wilayahName = wilayahInfo[wilayahCode] || getWilayahName(wilayahCode);
           const message = `⚠️ *Peringatan Cuaca Ekstrem*\n\n` +
             `*Wilayah:* ${wilayahCode}\n` +
+            `*Nama Wilayah:* ${escapeMarkdown(wilayahName)}\n` +
             `*Waktu:* ${escapeMarkdown(f.local_datetime || '')}\n` +
             `*Cuaca:* ${escapeMarkdown(f.weather_desc || '')}\n` +
             `*Suhu:* ${f.t ?? 'N/A'}°C\n` +

@@ -745,6 +745,27 @@ function process_warnings($db) {
     }
 }
 
+// Fungsi untuk mendapatkan nama wilayah dari kode adm4
+function get_wilayah_name($adm4) {
+    // Mapping kode wilayah ke nama (untuk wilayah yang umum digunakan)
+    $wilayah_map = [
+        '34.71.08.1001' => 'Umbulharjo, Kota Yogyakarta',
+        '34.02.10.2001' => 'Piyungan, Bantul',
+        '34.02.15.2004' => 'Banguntapan, Bantul',
+        '34.02.01.2001' => 'Bantul, Bantul',
+        '34.71.01.1001' => 'Gondomanan, Kota Yogyakarta',
+        '34.71.02.1001' => 'Gedongtengen, Kota Yogyakarta',
+        '34.71.03.1001' => 'Bausasran, Kota Yogyakarta',
+        '34.71.04.1001' => 'Baciro, Kota Yogyakarta',
+        '34.04.07.1001' => 'Caturtunggal, Sleman',
+        '34.04.07.1002' => 'Condongcatur, Sleman',
+        '34.04.07.1003' => 'Depok, Sleman',
+        '34.04.07.1004' => 'Maguwoharjo, Sleman',
+    ];
+    
+    return $wilayah_map[$adm4] ?? $adm4; // Return nama jika ada, atau kode jika tidak ada
+}
+
 // Cek apakah cuaca ekstrem
 function is_extreme_weather($forecast) {
     $weather_desc = strtolower($forecast['weather_desc'] ?? '');
@@ -840,6 +861,7 @@ function process_weather($db) {
     
     log_message('INFO', "Processing weather for " . count($wilayah_list) . " wilayah: " . implode(', ', $wilayah_list));
     $new_count = 0;
+    $wilayah_info = []; // Store wilayah info from API response
     
     foreach ($wilayah_list as $adm4) {
         try {
@@ -886,6 +908,24 @@ function process_weather($db) {
             
             // Log struktur data untuk debugging
             log_message('DEBUG', "Weather data structure for $adm4: " . json_encode(array_keys($data)));
+            
+            // Simpan informasi lokasi dari response API
+            if (isset($data['lokasi'])) {
+                $lokasi = $data['lokasi'];
+                $desa = $lokasi['desa'] ?? '';
+                $kecamatan = $lokasi['kecamatan'] ?? '';
+                $kotkab = $lokasi['kotkab'] ?? '';
+                
+                // Format: Desa, Kecamatan, Kabupaten/Kota
+                $nama_wilayah = trim(implode(', ', array_filter([$desa, $kecamatan, $kotkab])));
+                if (!empty($nama_wilayah)) {
+                    $wilayah_info[$adm4] = $nama_wilayah;
+                } else {
+                    $wilayah_info[$adm4] = get_wilayah_name($adm4);
+                }
+            } else {
+                $wilayah_info[$adm4] = get_wilayah_name($adm4);
+            }
             
             // Struktur BMKG: { lokasi: "...", data: [{ lokasi: "...", cuaca: [...] }] }
             // atau langsung array of forecast objects
@@ -1021,8 +1061,13 @@ function process_weather($db) {
                 foreach ($extreme_forecasts as $result) {
                     $f = $result['forecast'];
                     $wilayah_code = $result['adm4'];
+                    
+                    // Ambil nama wilayah dari info yang sudah di-fetch, atau dari mapping
+                    $wilayah_name = $wilayah_info[$wilayah_code] ?? get_wilayah_name($wilayah_code);
+                    
                     $message = "⚠️ *Peringatan Cuaca Ekstrem*\n\n" .
                                "*Wilayah:* $wilayah_code\n" .
+                               "*Nama Wilayah:* " . escape_markdown($wilayah_name) . "\n" .
                                "*Waktu:* " . escape_markdown($f['local_datetime'] ?? '') . "\n" .
                                "*Cuaca:* " . escape_markdown($f['weather_desc'] ?? '') . "\n" .
                                "*Suhu:* " . ($f['t'] ?? 'N/A') . "°C\n" .
